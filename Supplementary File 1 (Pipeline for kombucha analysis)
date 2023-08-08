@@ -1,0 +1,835 @@
+########  LSU ANALYSIS   #########
+
+
+
+# Loading all required libraries
+library(dada2); packageVersion("dada2")
+library(ggplot2)
+library(phyloseq)
+library(Biostrings)
+library(phangorn)
+library(tibble) 
+library(tidyr)  
+library(ShortRead)
+library(dbplyr)
+library(DECIPHER)   
+library(ape)   
+library(DESeq2)   
+library(ggplot2)    
+library(phyloseq)    
+library(plotly)  
+library(vegan)      
+library(tidyverse)   
+library(adespatial)  
+library(devtools)    
+library(qiime2R)  
+library(MicrobeR)  
+library(microbiome)  
+library(microbiomeSeq)  
+library("pander")  
+library(ranacapa)  
+library(grid)  
+library(gridExtra)   
+library(png)  
+library("ggdendro")  
+library(ggpubr)  
+library(RColorBrewer)  
+library(microbiomeutilities)  
+library(dplyr)
+library(microbiome)
+library(ggdendro)
+library(dendextend)
+library(reshape)
+library(microViz)
+library(lme4)
+library(ggpubr)
+library(ALDEx2)
+
+#
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+#
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+#
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+
+#
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+#
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# Removing primers 
+FWD <- "NNNNNNAACKGCGAGTGAAGMRGBA"  
+REV <- "NNNNNNYSWTYMCYBYACKKKWBYBS"
+
+trimLeft = c(FWD,REV) 
+
+#
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE,trimLeft = c(25,26)) 
+ 
+#
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE) 
+
+#
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+
+#
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+#
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+#
+seqtab <- makeSequenceTable(mergers)
+
+#
+table(nchar(getSequences(seqtab)))
+
+#
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+#
+sum(seqtab.nochim)/sum(seqtab)
+
+#
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+write.csv(track,"Sequencing Statistics - LSU.csv")
+
+#
+taxa <- assignTaxonomy(seqtab.nochim, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Kombucha_Analysis/Actual_analysis/Tax/sh_general_release_s_10.05.2021.tar")
+taxa.print <- taxa 
+
+#
+sequences<- getSequences(seqtab.nochim)
+names(sequences)<-sequences
+
+#
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor=NA)
+
+#
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+
+#
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm) 
+fit<- pml(treeNJ, data = phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                    rearrangement = "stochastic", control = pml.control(trace = 0))
+
+# Metadata
+map <- import_qiime_sample_data("UclustCombinedMicrobiomeData.tsv")
+
+# Creating  Phyloseq object
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+              tax_table(taxa.print),phy_tree(fitGTR$tree))
+
+# Merge ps with map
+ps <- merge_phyloseq(ps, map)
+ps
+
+#  
+set.seed(711)
+level_order <- c('Set_1', 'Set_2','Set_3','Set_4')
+
+DATA.2 <- ps  
+#DATA.2 = DATA.fun 
+
+df = as.data.frame(sample_data(DATA.2))
+#df$site = as.numeric(as.character(df$site))
+df$LibrarySize = sample_sums(DATA.2)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= Set))+
+  geom_point()+
+  facet_wrap(~ factor(Set, level = level_order)) +
+  scale_y_continuous(trans='sqrt')
+  
+#
+physeq.gen <- aggregate_taxa(ps,"Genus")
+dom.tax <- dominant_taxa(ps,level = "Genus", group="Set")
+head(dom.tax$dominant_overview)
+
+
+# Get count of phyla
+table(phyloseq::tax_table(ps)[, "Phylum"])
+
+#Get count of Genus
+table(phyloseq::tax_table(ps)[, "Genus"])
+
+# Compute prevalence of each feature
+prevdf <- apply(X = otu_table(ps), 
+               MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2), 
+               FUN = function(x){sum(x > 0)})
+
+# Add taxonomy and total read counts 
+prevdf <- data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps),
+                    tax_table(ps))
+                    
+## Compute the total and average prevalences of the features in each phylum.
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+
+# Giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim_final)
+asv_headers <- vector(dim(seqtab.nochim_final)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim_final)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# Making and writing out a fasta of our final ASV seqs:
+    
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+# count table:
+asv_tab <- t(seqtab.nochim_final)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+# Giving taxonomy table corresponding names as above (ASV_1, ASV_2...)
+row.names(taxa.PRINT) <- sub(">", "", asv_headers)
+write.table(taxa.PRINT, "ASVs_named_correctly.tsv", sep="\t", quote=F, col.names=NA)
+
+#
+tax_tab <- as.matrix(read.table("ASVs_named_correctly.tsv", header=T,
+           row.names=1, check.names=F, sep="\t"))
+
+sample_info_tab <- read.table("UclustCombinedMicrobiomeData.tsv", header=F, row.names=1,
+                   check.names=F, sep="\t")
+
+sample_info_tab$Replicate<- as.character(sample_info_tab$V2)
+
+sample_info_tab$color<- as.character(sample_info_tab$V3)
+
+sample_info_tab$Batch<- as.character(sample_info_tab$V4)
+
+sample_info_tab$Set<- as.character(sample_info_tab$V5)
+
+
+#Normalizing for sampling depth
+
+deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData = sample_info_tab, design = ~ Set) 
+deseq_counts_vst <- DESeq(deseq_counts,sfType = "poscounts")
+vst_trans_count_tab <- assay(deseq_counts_vst)
+
+#Rarefaction curves
+rarecurve(t(count_tab), step=100, col=sample_info_tab$color, lwd=2, ylab="ASVs", label=F)
+abline(v=(min(rowSums(t(count_tab))))) # Adding a vertical line at the fewest seqs in any sample to curve above 
+
+# Abundance value transformation. 
+ps_rel_abund <- phyloseq::transform_sample_counts(ps, function(x){x / sum(x)})
+
+
+#Agglomerate to phylum-level and rename
+ps_phylum <- phyloseq::tax_glom(ps, "Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+phyloseq::otu_table(ps_phylum)[1:2, 1:2]
+
+#Subset groups by Batch (Batch_1)
+Batch_1_phy <- phyloseq::subset_samples(ps_phylum, Batch == "Batch_1")
+head(sample_sums(Batch_1_phy))
+head(get_taxa(Batch_1_phy))
+
+#Subset groups by Batch (Batch_2)
+Batch_2_phy <- phyloseq::subset_samples(ps_phylum, Batch == "Batch_2")
+head(sample_sums(Batch_2_phy))
+head(get_taxa(Batch_2_phy))
+
+
+####Subsetting by Batch to Genus Level. 
+ps_genus_batch <- phyloseq::tax_glom(ps, "Genus")
+phyloseq::taxa_names(ps_genus_batch) <- phyloseq::tax_table(ps_genus_batch)[, "Genus"]
+phyloseq::otu_table(ps_genus_batch)[1:4, 1:4]
+
+
+#Subset groups by Batch (Batch_1)
+Batch_1_ge <- phyloseq::subset_samples(ps_genus_batch, Batch == "Batch_1")
+head(sample_sums(Batch_1_ge))
+head(get_taxa(Batch_1_ge))
+
+
+#Subset groups by Batch (Batch_2)
+Batch_2_ge <- phyloseq::subset_samples(ps_genus_batch, Batch == "Batch_2")
+head(sample_sums(Batch_2_ge))
+head(get_taxa(Batch_2_ge))
+
+
+###Core fungal Microbiome associated with Batch 1 Replicate A
+Batch_1_Replicate_A <- subset_samples(ps_gen_rel_batch_1, 
+                                 Batch == "Batch_1" & Replicate == "A")
+
+Batch_1_Replicate_A <- Batch_1_Replicate_A %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_1_Replicate_A, detection = 0.0001, prevalence = 60/100)
+
+
+### Making Composition plot
+basic <- plot_composition(Batch_1_Replicate_A, sample.sort = c("B1D1Af-LSU","B1D2Af-LSU","B1D3Af-LSU", "B1D4Af-LSU","B1D5Af-LSU",
+                                                              "B1D6Af-LSU","B1D7Af-LSU","B1D8Af-LSU")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fungal relative abundance in Lab Brew Kombucha Batch 1 (Replicate A)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+
+publication_style
+
+
+### Core fungal Microbiome associated with Batch 1 Replicate B
+
+##Subset into reps (Replicate B)
+Batch_1_Replicate_B <- subset_samples(ps_gen_rel_batch_1, 
+                                 Batch == "Batch_1" & Replicate == "B")
+
+Batch_1_Replicate_B <- Batch_1_Replicate_B %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_1_Replicate_B, detection = 0.0001, prevalence = 60/100)
+
+### Making Composition plot
+
+basic <- plot_composition(Batch_1_Replicate_B, sample.sort = c("B1D1Bf-LSU","B1D2Bf-LSU","B1D3Bf-LSU", "B1D4Bf-LSU","B1D5Bf-LSU",
+                                                              "B1D6Bf-LSU","B1D7Bf-LSU","B1D8Bf-LSU")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette1) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fungal relative abundance in Lab Brew Kombucha Batch 1 (Replicate B)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+
+publication_style
+
+
+### Core fungal Microbiome associated with Batch 2 Replicate A
+
+Batch_2_Replicate_A <- subset_samples(ps_gen_rel_batch_2, 
+                                 Batch == "Batch_2" & Replicate == "A")
+
+Batch_2_Replicate_A <- Batch_2_Replicate_A %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_2_Replicate_A, detection = 0.0001, prevalence = 60/100)
+
+### Making Composition plot
+
+
+basic <- plot_composition(Batch_2_Replicate_A, sample.sort = c("B2D1Af-LSU","B2D2Af-LSU","B2D3Af-LSU", "B2D4Af-LSU","B2D5Af-LSU",
+                                                              "B2D6Af-LSU","B2D7Af-LSU","B2D8Af-LSU")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette3) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fungal relative abundance in Lab Brew Kombucha Batch 2 (Replicate A)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+
+publication_style
+
+
+### Core fungal Microbiome associated with Batch 2 Replicate B
+
+Batch_2_Replicate_B <- subset_samples(ps_gen_rel_batch_2, 
+                                 Batch == "Batch_2" & Replicate == "B")
+
+Batch_2_Replicate_B <- Batch_2_Replicate_B %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_2_Replicate_B, detection = 0.0001, prevalence = 60/100)
+
+
+### Making Composition plot
+basic <- plot_composition(Batch_2_Replicate_B, sample.sort = c("B2D1Bf-LSU","B2D2Bf-LSU","B2D3Bf-LSU", "B2D4Bf-LSU","B2D5Bf-LSU",
+                                                              "B2D6Bf-LSU","B2D7Bf-LSU","B2D8Bf-LSU")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette3) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Fungal relative abundance in Lab Brew Kombucha Batch 2 (Replicate B)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+publication_style
+
+
+###Alpha Diversity
+library(picante)
+library(ggpubr)
+set.seed(123)
+adiv <- data.frame(
+    "Observed" = phyloseq::estimate_richness(ps, measures = "Observed"),
+  "Shannon" = phyloseq::estimate_richness(ps, measures = "Shannon"),
+  "InvSimpson" = phyloseq::estimate_richness(ps, measures = "InvSimpson"),
+  "Batch" = phyloseq::sample_data(ps)$Batch,
+"Replicate" = phyloseq::sample_data(ps)$Replicate)
+head(adiv)
+
+
+##Stat for Batch
+
+adiv %>%
+  gather(key = metric, value = value, c("Observed", "Shannon", "InvSimpson")) %>%
+  mutate(metric = factor(metric, levels = c("Observed", "Shannon", "InvSimpson"))) %>%
+  ggplot(aes(x = Batch, y = value)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_jitter(aes(color = Batch), height = 0, width = .2) +
+  labs(x = "", y = "") +
+  facet_wrap(~ metric, scales = "free") +
+  theme(legend.position="none") + stat_compare_means(method = "wilcox")
+
+
+alpha.diversity <- estimate_richness(ps, measures = c("Observed", "InvSimpson", "Shannon"))
+head(alpha.diversity)
+
+
+###Run a Shapiro-Wilk test of normality to test for normalcy statistically
+
+shapiro.test(alpha.diversity$Shannon)
+
+
+## Non-parametric permutation based MANOVA (often called PERMANOVA) implemented with ADONIS
+
+otu <- abundances(ps_rel_abund)
+meta <- meta(ps_rel_abund)
+
+#Statistics - Bdiv
+permanova <- adonis(t(otu) ~ Batch, data = meta, permutations=1000, method = "bray")
+
+#P-value
+print(as.data.frame(permanova$aov.tab)["Batch", "Pr(>F)"])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+########  16S ANALYSIS  #########
+
+### Load required libraries as above
+
+#
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+#
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+
+#
+plotQualityProfile(fnFs[1:2])
+
+# 
+plotQualityProfile(fnRs[1:2])
+
+#
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+#
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# 
+FWD <- "NNNNNNGTGYCAGCMGCCGCGGTAA"  
+REV <- "NNNNNNGGACTACNVGGGTWTCTAAT"
+
+trimLeft = c(FWD,REV) 
+
+#
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE,trimLeft = c(25,26)) 
+
+#
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+#
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+
+#
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+#
+seqtab <- makeSequenceTable(mergers)
+
+
+# 
+taxa <- assignTaxonomy(seqtab.nochim, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Wine_Data_Run_Repeated 02_May_2022/16S_Data_2021/Tax/silva_nr_v132_train_set.fa.gz")
+taxa <- addSpecies(taxa, "/nesi/project/landcare02543/data/Ohwofasa/ohwofasaa/ohwofasaa/ohwofasa/Wine_Data_Run_Repeated 02_May_2022/16S_Data_2021/Tax/silva_species_assignment_v138.1.fa.gz")
+
+
+#
+sequences<- getSequences(seqtab.nochim)
+names(sequences)<-sequences
+
+#
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor=NA)
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm) 
+fit<- pml(treeNJ, data = phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+
+#
+fitGTR <- optim.pml(fitGTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                    rearrangement = "stochastic", control = pml.control(trace = 0))
+
+# Adding  metadata
+map <- import_qiime_sample_data("UclustCombinedMicrobiomeDataK-copy1.tsv")
+
+#
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+              tax_table(taxa.print),phy_tree(fitGTR$tree))
+
+
+
+## Merge phyloseq object and meta data
+ps <- merge_phyloseq(ps, map)
+ps
+
+### Taxa cleaning to remove sequences that aligned to chloroplast and mitochondria
+ps1 <- ps0 %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &
+    Family  != "Mitochondria" &
+    Class   != "Chloroplast" &
+    Phylum != "Cyanobacteria" &
+    Phylum != "Chloroplast" &
+    Phylum != "Chloroflexi")
+
+### 
+set.seed(711)
+level_order <- c('Batch_1', 'Batch_2')
+
+DATA.2 <- ps  
+#DATA.2 = DATA.fun 
+
+df = as.data.frame(sample_data(DATA.2))
+#df$site = as.numeric(as.character(df$site))
+df$LibrarySize = sample_sums(DATA.2)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= Replicate))+
+  geom_point()+
+  facet_wrap(~ factor(Batch, level = level_order)) +
+  scale_y_continuous(trans='sqrt')
+
+
+##
+physeq.gen <- aggregate_taxa(ps,"Genus")
+dom.tax <- dominant_taxa(ps,level = "Genus", group="Replicate")
+head(dom.tax$dominant_overview)
+
+##
+# Get count of phyla
+table(phyloseq::tax_table(ps)[, "Phylum"])
+
+#Get count of Genus
+table(phyloseq::tax_table(ps)[, "Genus"])
+
+# Compute prevalence of each feature
+prevdf <- apply(X = otu_table(ps), 
+               MARGIN = ifelse(taxa_are_rows(ps), yes = 1, no = 2), 
+               FUN = function(x){sum(x > 0)})
+
+# Add taxonomy and total read counts 
+prevdf <- data.frame(Prevalence = prevdf,
+                    TotalAbundance = taxa_sums(ps),
+                    tax_table(ps))
+
+
+## Compute the total and average prevalences of the features in each phylum.
+plyr::ddply(prevdf, "Phylum", function(df1){cbind(mean(df1$Prevalence),sum(df1$Prevalence))})
+
+# Giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# Making and writing out a fasta of our final ASV seqs:
+    
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+# count table:
+asv_tab <- t(seqtab.nochim_final)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+# Giving taxonomy table corresponding names as above (ASV_1, ASV_2...)
+row.names(taxa.PRINT) <- sub(">", "", asv_headers)
+write.table(taxa.PRINT, "ASVs_named_correctly.tsv", sep="\t", quote=F, col.names=NA)
+
+#
+tax_tab <- as.matrix(read.table("ASVs_named_correctly.tsv", header=T,
+           row.names=1, check.names=F, sep="\t"))
+
+sample_info_tab <- read.table("UclustCombinedMicrobiomeData.tsv", header=F, row.names=1,
+                   check.names=F, sep="\t")
+
+sample_info_tab$Replicate<- as.character(sample_info_tab$V2)
+
+sample_info_tab$color<- as.character(sample_info_tab$V3)
+
+sample_info_tab$Batch<- as.character(sample_info_tab$V4)
+
+sample_info_tab$Set<- as.character(sample_info_tab$V5)
+
+
+count_tab <- read.table("ASVs_counts.tsv", header=T, row.names=1,
+             check.names=F, sep="\t")
+
+#Normalizing for sampling depth
+deseq_counts <- DESeqDataSetFromMatrix(count_tab, colData = sample_info_tab, design = ~ Batch) 
+deseq_counts_vst <- DESeq(deseq_counts,sfType = "poscounts")
+vst_trans_count_tab <- assay(deseq_counts_vst)
+
+#Rarefaction curves
+rarecurve(t(count_tab), step=100, col=sample_info_tab$color, lwd=2, ylab="ASVs", label=F)
+abline(v=(min(rowSums(t(count_tab))))) # Adding a vertical line at the fewest seqs in any sample to curve above 
+
+# Abundance value transformation. 
+ps_rel_abund <- phyloseq::transform_sample_counts(ps, function(x){x / sum(x)})
+
+
+#Agglomerate to phylum-level and rename
+ps_phylum <- phyloseq::tax_glom(ps, "Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+phyloseq::otu_table(ps_phylum)[1:4, 1:4]
+
+#Subset groups by Batch (Batch_1)
+Batch_1_phy <- phyloseq::subset_samples(ps_phylum, Batch == "Batch_1")
+head(sample_sums(Batch_1_phy))
+head(get_taxa(Batch_1_phy))
+
+#Subset groups by Batch (Batch_2)
+Batch_2_phy <- phyloseq::subset_samples(ps_phylum, Batch == "Batch_2")
+head(sample_sums(Batch_2_phy))
+head(get_taxa(Batch_2_phy))
+
+####Subsetting by Batch to Genus Level. 
+ps_genus_batch <- phyloseq::tax_glom(ps, "Genus")
+phyloseq::taxa_names(ps_genus_batch) <- phyloseq::tax_table(ps_genus_batch)[, "Genus"]
+phyloseq::otu_table(ps_genus_batch)[1:4, 1:4]
+
+#Subset groups by Batch (Batch_1)
+Batch_1_ge <- phyloseq::subset_samples(ps_genus_batch, Batch == "Batch_1")
+head(sample_sums(Batch_1_ge))
+head(get_taxa(Batch_1_ge))
+
+#Subset groups by Batch (Batch_2)
+Batch_2_ge <- phyloseq::subset_samples(ps_genus_batch, Batch == "Batch_2")
+head(sample_sums(Batch_2_ge))
+head(get_taxa(Batch_2_ge))
+
+
+###Core bacterial microbiome associated with Batch 1 Replicate A
+Batch_1_Replicate_A <- subset_samples(ps_gen_rel_batch_1, 
+                                 Batch == "Batch_1" & Replicate == "A")
+
+Batch_1_Replicate_A <- Batch_1_Replicate_A %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_1_Replicate_A, detection = 0.0001, prevalence = 60/100)
+
+### Making Composition plots
+basic <- plot_composition(Batch_1_Replicate_A, sample.sort = c("B1D1Ab-16S", "B1D2Ab-16S","B1D3Ab-16S", "B1D4Ab-16S","B1D5Ab-16S",
+                                                              "B1D6Ab-16S","B1D7Ab-16S","B1D8Ab-16S")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Bacteria relative abundance in Lab Brew Kombucha Batch 1 (Replicate A)") + theme(legend.title = element_text(size = 18))
+
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+
+
+publication_style
+
+
+### 
+#Subset into reps (Replicate B)
+Batch_1_Replicate_B <- subset_samples(ps_gen_rel_batch_1, 
+                                 Batch == "Batch_1" & Replicate == "B")
+
+Batch_1_Replicate_B <- Batch_1_Replicate_B %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+core_members(Batch_1_Replicate_B, detection = 0.0001, prevalence = 60/100)
+
+
+#### Making Composition plots
+basic <- plot_composition(Batch_1_Replicate_B, sample.sort = c("B1D1Bb-16S", "B1D2Bb-16S","B1D3Bb-16S", "B1D4Bb-16S","B1D5Bb-16S",
+                                                              "B1D6Bb-16S","B1D7Bb-16S","B1D8Bb-16S")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette1) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Bacteria relative abundance in Lab Brew Kombucha Batch 1 (Replicate B)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+publication_style
+
+
+
+
+
+###Core Bacterial Microbiome associated with Batch 2
+ps_gen_rel_batch_2 <- microbiome::transform(Batch_2_ge, "compositional")
+
+ps_gen_rel_batch_2 <- Batch_2_ge %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+core_members(ps_gen_rel_batch_2, detection = 0.0001, prevalence = 60/100)
+
+
+
+##Subset into reps (Replicate A)
+Batch_2_Replicate_A <- subset_samples(ps_gen_rel_batch_2, 
+                                 Batch == "Batch_2" & Replicate == "A")
+
+Batch_2_Replicate_A <- Batch_2_Replicate_A %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+
+## Making composition plot
+basic <- plot_composition(Batch_2_Replicate_A, sample.sort = c("B2D1Ab-16S", "B2D2Ab-16S","B2D3Ab-16S", "B2D4Ab-16S","B2D5Ab-16S",
+                                                              "B2D6Ab-16S","B2D7Ab-16S","B2D8Ab-16S")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette2) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Bacteria relative abundance in Lab Brew Kombucha Batch 2 (Replicate A)") + theme(legend.title = element_text(size = 18))
+
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+publication_style
+
+
+
+##Subset into reps (Replicate B)
+Batch_2_Replicate_B <- subset_samples(ps_gen_rel_batch_2, 
+                                 Batch == "Batch_2" & Replicate == "B")
+
+Batch_2_Replicate_B <- Batch_2_Replicate_B %>%
+  aggregate_rare(level = "Genus", detection = 0.0001, prevalence = 60/100) %>% 
+  microbiome::transform(transform = "compositional")
+
+
+## Making composition plot
+basic <- plot_composition(Batch_2_Replicate_B, sample.sort = c("B2D1Bb-16S", "B2D2Bb-16S","B2D3Bb-16S", "B2D4Bb-16S","B2D5Bb-16S",
+                                                              "B2D6Bb-16S","B2D7Bb-16S","B2D8Bb-16S")) + theme(legend.position = "bottom") + scale_fill_manual("Genus", values = cb_palette3) + scale_color_viridis(option = "D")+ theme_bw() + theme(axis.text.x = element_text(angle = 90)) + ggtitle("Bacteria relative abundance in Lab Brew Kombucha Batch 2 (Replicate B)") + theme(legend.title = element_text(size = 18))
+publication_style<- basic + theme(axis.line = element_line(size=0.5),panel.background = element_rect(fill=NA,size=rel(20)), panel.grid.minor = element_line(colour = NA), axis.text = element_text(size=10), axis.title = element_text(size=18)) 
+
+#### To stop the bars from floating
+publication_style<- basic + scale_y_continuous(expand=c(0,0)) +
+labs(x = "\nDays from Start of Fermentation",
+       y = "Relative abundance")
+
+publication_style
+
+
+
+
+
+
+###Alpha Diversity
+library(picante)
+library(ggpubr)
+set.seed(123)
+adiv <- data.frame(
+    "Observed" = phyloseq::estimate_richness(ps, measures = "Observed"),
+  "Shannon" = phyloseq::estimate_richness(ps, measures = "Shannon"),
+  "InvSimpson" = phyloseq::estimate_richness(ps, measures = "InvSimpson"),
+  "Batch" = phyloseq::sample_data(ps)$Batch,
+"Replicate" = phyloseq::sample_data(ps)$Replicate)
+head(adiv)
+
+
+##Stat for Batch
+
+adiv %>%
+  gather(key = metric, value = value, c("Observed", "Shannon", "InvSimpson")) %>%
+  mutate(metric = factor(metric, levels = c("Observed", "Shannon", "InvSimpson"))) %>%
+  ggplot(aes(x = Batch, y = value)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_jitter(aes(color = Batch), height = 0, width = .2) +
+  labs(x = "", y = "") +
+  facet_wrap(~ metric, scales = "free") +
+  theme(legend.position="none") + stat_compare_means(method = "wilcox")
+
+
+alpha.diversity <- estimate_richness(ps, measures = c("Observed", "InvSimpson", "Shannon"))
+head(alpha.diversity)
+
+
+###Run a Shapiro-Wilk test of normality to test for normalcy statistically
+
+shapiro.test(alpha.diversity$Shannon)
+
+
+## Non-parametric permutation based MANOVA (often called PERMANOVA) implemented with ADONIS
+
+otu <- abundances(ps_rel_abund)
+meta <- meta(ps_rel_abund)
+
+#Statistics - Bdiv
+permanova <- adonis(t(otu) ~ Batch, data = meta, permutations=1000, method = "bray")
+
+#P-value
+print(as.data.frame(permanova$aov.tab)["Batch", "Pr(>F)"])
+
+
+
+
+
+ 
+
+
